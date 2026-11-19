@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#101827"><title>Synthetic Spike Swing Hunter</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b1220;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;padding:16px}
+main{max-width:760px;margin:auto}h1{font-size:24px;margin:6px 0}p{color:#9ca3af;line-height:1.5}.card{background:#111c2e;border:1px solid #263449;border-radius:16px;padding:16px;margin:14px 0}
+select,button{font:inherit;color:#e5e7eb;background:#17253a;border:1px solid #34465f;border-radius:12px;padding:12px;width:100%}button{cursor:pointer;background:#2563eb;border:0;margin-top:10px;font-weight:700}
+.price{font-size:28px;font-weight:800;margin:10px 0}.status{padding:10px;border-radius:12px;background:#263449}.red{color:#fca5a5}.green{color:#86efac}.amber{color:#fcd34d}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.metric{padding:12px;background:#0c1727;border-radius:12px}.metric small{color:#9ca3af;display:block;margin-bottom:6px}.metric b{font-size:18px}
+#log{max-height:230px;overflow:auto;font-size:14px;line-height:1.5}.muted{font-size:12px;color:#94a3b8}
+</style></head><body><main>
+<h1>⚡ Synthetic Spike Swing Hunter</h1><p>Mobile prototype · Deriv public tick stream · Experimental reversal watch only</p>
+<div class="card"><label for="symbol">Synthetic index</label><select id="symbol">
+<option value="BOOM1000">Boom 1000</option><option value="BOOM500">Boom 500</option><option value="CRASH1000">Crash 1000</option><option value="CRASH500">Crash 500</option></select>
+<button id="connect">Connect live feed</button><div id="connection" class="status" style="margin-top:12px">Disconnected</div>
+<div class="price" id="price">—</div><div class="muted" id="time">Waiting for tick data</div></div>
+<div class="card"><h2>Signal watch</h2><div id="signal" class="status">No setup — collecting ticks</div><div class="grid" style="margin-top:12px">
+<div class="metric"><small>Recent movement</small><b id="move">—</b></div><div class="metric"><small>Spike score</small><b id="score">0 / 100</b></div>
+<div class="metric"><small>Tick sample</small><b id="sample">0</b></div><div class="metric"><small>Mode</small><b>Watch only</b></div></div></div>
+<div class="card"><h2>Recent observations</h2><div id="log">No observations yet.</div></div>
+<div class="card"><b>Important limitations</b><p class="muted">This prototype classifies tick movement only. It does not yet use true bid/ask order flow, full 15-minute candles, verified swing rules, risk sizing, or backtested performance. A signal is not a recommendation. Test on demo.</p></div>
+</main>
+<script>
+const el=id=>document.getElementById(id);
+let ws, ticks=[], lastSignalAt=0;
+const symbolMap={BOOM1000:"BOOM1000",BOOM500:"BOOM500",CRASH1000:"CRASH1000",CRASH500:"CRASH500"};
+function note(s){const d=new Date().toLocaleTimeString();el("log").innerHTML=`<div>${d} — ${s}</div>`+el("log").innerHTML;if(el("log").children.length>30)el("log").lastChild.remove();}
+function disconnect(){if(ws){try{ws.close()}catch(e){}}ws=null;}
+el("connect").onclick=()=>{
+ disconnect();ticks=[];el("connection").textContent="Connecting…";el("signal").textContent="Collecting tick data…";
+ const selected=el("symbol").value;
+ ws=new WebSocket("wss://ws.derivws.com/websockets/v3?app_id=1089");
+ ws.onopen=()=>{el("connection").textContent="Connected · requesting live ticks";ws.send(JSON.stringify({ticks:selected,subscribe:1}));};
+ ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.error){el("connection").textContent="Feed error: "+d.error.message;return;}
+ if(d.tick&&d.tick.quote!=null){const q=Number(d.tick.quote);ticks.push({q,t:d.tick.epoch});if(ticks.length>240)ticks.shift();el("price").textContent=q.toFixed(d.tick.pip_size??2);el("time").textContent=new Date(d.tick.epoch*1000).toLocaleString();el("connection").textContent="Live tick stream · "+selected;analyze(selected);}};
+ ws.onerror=()=>el("connection").textContent="Connection error. Try again.";
+ ws.onclose=()=>{if(el("connection").textContent.startsWith("Live"))el("connection").textContent="Connection closed";};
+};
+function analyze(sym){
+ if(ticks.length<30){el("sample").textContent=ticks.length;return;}
+ const recent=ticks.slice(-30), base=ticks.slice(-120,-30);
+ const start=recent[0].q, end=recent[recent.length-1].q, delta=end-start;
+ const mean=base.reduce((s,x)=>s+x.q,0)/base.length;
+ const sd=Math.sqrt(base.reduce((s,x)=>s+(x.q-mean)**2,0)/base.length)||1;
+ const move=delta/sd;const score=Math.min(100,Math.round(Math.abs(move)*18));
+ el("move").textContent=(delta>0?"+":"")+delta.toFixed(3);
+ el("score").textContent=score+" / 100";el("sample").textContent=ticks.length;
+ // directional spike followed by reversal in last handful of ticks; heuristic only.
+ const last=ticks.slice(-8), first=ticks.slice(-20,-8);
+ const recentDelta=last[last.length-1].q-last[0].q, priorDelta=first[first.length-1].q-first[0].q;
+ const boom=sym.startsWith("BOOM"), crash=sym.startsWith("CRASH");
+ let msg="No setup — collecting/awaiting movement", cls="";
+ if(score>=65&&priorDelta>0&&recentDelta<0&&boom){msg="Potential BOOM sell-reversal watch — confirm on candles";cls="red";}
+ else if(score>=65&&priorDelta<0&&recentDelta>0&&crash){msg="Potential CRASH buy-reversal watch — confirm on candles";cls="green";}
+ else if(score>=65){msg="Large movement detected — no reversal confirmation";cls="amber";}
+ el("signal").textContent=msg;el("signal").className="status "+cls;
+ if(score>=65&&msg.includes("Potential")&&Date.now()-lastSignalAt>60000){note(msg+" · score "+score);lastSignalAt=Date.now();}
+}
+</script></body></html>
